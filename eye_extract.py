@@ -4,7 +4,7 @@ import xlrd
 import numpy as np
 from pykalman import KalmanFilter
 import scipy.signal as signal
-
+import time
 
 FREQUENCY_BANDS = [
   (0, 0.2),
@@ -341,8 +341,10 @@ def extract_save_eye_fea(xlsx_path, save_dir, start_triggers, end_triggers,
         os.makedirs(save_dir)
 
     print("Start open {}".format(xlsx_path))
+    start = time.time()
     eye_file = xlrd.open_workbook(xlsx_path)
-    print("Successfully open {} !".format(xlsx_path))
+    end = time.time()
+    print("Successfully open {} taking {}s!".format(xlsx_path, end - start))
     eye_table = eye_file.sheets()[0]
     desc_row = eye_table.row_values(0)
     n_cols = len(desc_row)
@@ -359,11 +361,10 @@ def extract_save_eye_fea(xlsx_path, save_dir, start_triggers, end_triggers,
         trial_fea = get_eye_feature_smooth(eye_table, start_indices[i], end_indices[i],
                                            window_size, overlap_rate, sample_freq, fea_type)
         np.save(save_dir + '/eye_fea_{}.npy'.format(i), trial_fea)
-        print(trial_fea)
 
 
 if __name__ == '__main__':
-    xlsx_path = '../data/raw/lirui-confidence-text confidence_text_hanxiao_20210113 copy.xlsx'
+    xlsx_path = '../data/raw/lirui-confidence-text confidence_text_hanxiao_20210113.xlsx'
     save_dir = '../data/eye_feature'
     window_size = 1
     overlap_rate = 0
