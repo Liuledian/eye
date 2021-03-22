@@ -1,4 +1,5 @@
 import os
+# 1.2.0 xlrd
 import xlrd
 import numpy as np
 from pykalman import KalmanFilter
@@ -11,31 +12,30 @@ FREQUENCY_BANDS = [
   (0.4, 0.6),
   (0.6, 1)
 ]
-EYE_FREQ = 120
 N_CHANNELS = 1
 STFT_N = 256
 
 
-def get_PSD_DE_for_a_window(mag_fft_data, frequency_band):
+def get_PSD_DE_for_a_window(mag_fft_data, frequency_band, sample_freq):
     n_channels = mag_fft_data.shape[0]
     band_energy_bucket = np.zeros((n_channels, len(frequency_band)))
     band_frequency_count = np.zeros((n_channels, len(frequency_band)))
     for band_index, (f_start, f_end) in enumerate(frequency_band):
         # Map frequency to data point indices in mag_fft_data array
-        fStartNum = np.floor(f_start / EYE_FREQ * STFT_N)
-        fEndNum = np.floor(f_end / EYE_FREQ * STFT_N)
+        fStartNum = np.floor(f_start / sample_freq * STFT_N)
+        fEndNum = np.floor(f_end / sample_freq * STFT_N)
         for p in range(int(fStartNum - 1), int(fEndNum)):
             band_energy_bucket[:, band_index] += mag_fft_data[:, p] ** 2
             band_frequency_count[:, band_index] += 1
     window_band_PSD = band_energy_bucket / band_frequency_count  # Scale to uV
     # why times 100 !!!!!!
-    window_band_DE = np.log2(100 * window_band_PSD)
+    window_band_DE = np.log2(window_band_PSD)
     return window_band_PSD, window_band_DE
 
 
-def get_PSD_DE_fea(slice_data, window_size, overlap_rate, frequency_band):
-    slice_data.shape=(1, slice_data.shape[0])
-    window_points = window_size * EYE_FREQ
+def get_PSD_DE_fea(slice_data, window_size, overlap_rate, frequency_band, sample_freq):
+    slice_data = np.reshape(slice_data, [N_CHANNELS, -1])
+    window_points = window_size * sample_freq
     step_points = (1 - overlap_rate) * window_points
     window_num = int(np.floor((slice_data.shape[1] - window_points) / step_points + 1))
 
@@ -47,7 +47,7 @@ def get_PSD_DE_fea(slice_data, window_size, overlap_rate, frequency_band):
         han_data = data_win * hanning
         fft_data = np.fft.fft(han_data, n=STFT_N)
         mag_fft_data = np.abs(fft_data[:, 0:int(STFT_N / 2)])
-        window_band_PSD, window_band_DE = get_PSD_DE_for_a_window(mag_fft_data)
+        window_band_PSD, window_band_DE = get_PSD_DE_for_a_window(mag_fft_data, frequency_band, sample_freq)
         band_PSD[:, :, window_index] = window_band_PSD
         band_DE[:, :, window_index] = window_band_DE
     return band_PSD, band_DE
@@ -81,33 +81,14 @@ def smooth_features(feature_data, method='LDS'):
     return smoothed_data
 
 
-def get_DE_PSD_smooth(slice_data, window_size, overlap_rate, frequency_bands):
+def get_DE_PSD_smooth(slice_data, window_size, overlap_rate, frequency_bands, sample_freq):
     # Compute DE and PSD feature
-    band_PSD, band_DE = get_PSD_DE_fea(slice_data, window_size, overlap_rate, frequency_bands)
+    band_PSD, band_DE = get_PSD_DE_fea(slice_data, window_size, overlap_rate, frequency_bands, sample_freq)
 
     # Smooth DE and PSD feature
     de_smooth_data = smooth_features(band_DE)
     psd_smooth_data = smooth_features(band_PSD)
     return de_smooth_data, psd_smooth_data
-
-
-def cal_seconds(time_arr,t1,t2):
-    #计算两个时间之间的秒数差
-    sec1 = (int(time_arr[t1][0:2]))*3600+(int(time_arr[t1][3:5]))*60+(int(time_arr[t1][6:8]))
-    sec2 = (int(time_arr[t2][0:2]))*3600+(int(time_arr[t2][3:5]))*60+(int(time_arr[t2][6:8]))
-    if(sec1>sec2):
-        sec2=sec2+24*3600
-    return sec2-sec1
-
-
-def cal_mseconds(time_arr,t1,t2):
-    #计算两个时间的毫秒差
-    sec1 = (int(time_arr[t1][0:2]))*3600+(int(time_arr[t1][3:5]))*60+(int(time_arr[t1][6:8]))
-    sec2 = (int(time_arr[t2][0:2]))*3600+(int(time_arr[t2][3:5]))*60+(int(time_arr[t2][6:8]))
-    if(sec1>sec2):
-        sec2=sec2+24*3600
-    sec_tmp = (int(time_arr[t2][9:12])-int(time_arr[t1][9:12]))
-    return (sec2-sec1)*1000+sec_tmp
 
 
 def interpolate(arr):
@@ -138,23 +119,24 @@ def interpolate(arr):
             arr[i] = sta_num - (i - sta) * sta_num / (len_a - 1 - sta)
 
 
-def get_pupil_psd_de_smooth(pl, pr, window_size, overlap_rate, eye_freq):
-    # convert raw data to numeric
-    len_n = len(pl)
-    for i in range(len_n):
-        if pl[i] == '':
-            pl[i] = -1
-        pl[i] = float(pl[i])
-        if pr[i] == '':
-            pr[i] = -1
-        pr[i] = float(pr[i])
+def preprocess_pupil(pupil_data):
+    n_samples = len(pupil_data)
+    for i in range(n_samples):
+        if pupil_data[i] == '':
+            pupil_data[i] = -1
+        pupil_data[i] = float(pupil_data[i])
+
     # interpolate for items with values -1
-    interpolate(pl)
-    interpolate(pr)
-    pl = np.array(pl)
-    pr = np.array(pr)
-    de_smoothed_l, psd_smooth_l = get_DE_PSD_smooth(pl, window_size, overlap_rate, FREQUENCY_BANDS)
-    de_smooth_r, psd_smooth_r = get_DE_PSD_smooth(pr, window_size, overlap_rate, FREQUENCY_BANDS)
+    interpolate(pupil_data)
+    return np.array(pupil_data)
+
+
+def get_pupil_psd_de_smooth(pl, pr, window_size, overlap_rate, sample_freq):
+    # convert raw data to numeric
+    pl = preprocess_pupil(pl)
+    pr = preprocess_pupil(pr)
+    de_smoothed_l, psd_smooth_l = get_DE_PSD_smooth(pl, window_size, overlap_rate, FREQUENCY_BANDS, sample_freq)
+    de_smooth_r, psd_smooth_r = get_DE_PSD_smooth(pr, window_size, overlap_rate, FREQUENCY_BANDS, sample_freq)
     shape = (len(FREQUENCY_BANDS), -1)
     de_smoothed_l = np.reshape(de_smoothed_l, shape)
     de_smooth_r = np.reshape(de_smooth_r, shape)
@@ -163,150 +145,131 @@ def get_pupil_psd_de_smooth(pl, pr, window_size, overlap_rate, eye_freq):
     return de_smoothed_l, psd_smooth_l, de_smooth_r, psd_smooth_r
 
 
-def get_statistics_fea(time_arr, pl, pr, event, duration, sac_amp, sfreq):
+def get_statistics_fea(time_arr, pl, pr, event, duration, window_size, overlap_rate, sample_freq):
     n_samples = len(pl)
-    features_all= np.zeros(0)
+    window_points = window_size * sample_freq
+    step_points = window_points * (1 - overlap_rate)
+    n_windows = int((n_samples - window_points) / step_points) + 1
+    pl = preprocess_pupil(pl)
+    pr = preprocess_pupil(pr)
 
-    for i in range(n_samples):
-        if pl[i] == '':
-            pl[i] = -1
-        pl[i] = float(pl[i])
-        if pr[i] == '':
-            pr[i] = -1
-        pr[i] = float(pr[i])
-    interpolate(pl)  # interpolation for values -1 in the PupilLeft list
-    interpolate(pr)  # interpolation for values -1 in the PupilRight list
-
-    data_pl = np.array(pl)
-    data_pl.shape=(1,data_pl.shape[0])
-    data_pr = np.array(pr)
-    data_pr.shape=(1,data_pr.shape[0])
-
-    mean_fix_dur_arr = np.zeros(1)  # fixation duration mean
-    std_fix_dur_arr = np.zeros(1)   # fixaation duration std
-    freq_fix_dur_arr = np.zeros(1)  # fixation duration frequency
-    max_fix_dur_arr = np.zeros(1)   # fixation duration maximum
-
-    mean_sac_dur_arr = np.zeros(1)  # saccade duration mean
-    std_sac_dur_arr = np.zeros(1)   # saccade duration std
-    freq_sac_dur_arr = np.zeros(1)  # saccade duration frequency
-    ave_sac_amp_arr = np.zeros(1)   # saccade amplitude average array
-    ave_sac_lat_arr = np.zeros(1)   # saccade latency average array
-
-    mean_bli_dur_arr = np.zeros(1)  # blink duration mean
-    std_bli_dur_arr = np.zeros(1)   # blink duration std
-    freq_bli_dur_arr = np.zeros(1)  # blink duration frequency
-
-    time_sec = n_samples / sfreq
-    pupil_left_mean_arr = np.zeros(time_sec)
-    pupil_left_std_arr = np.zeros(time_sec)
-    pupil_right_mean_arr = np.zeros(time_sec)
-    pupil_right_std_arr = np.zeros(time_sec)
-    sac_amp_arr = np.zeros(time_sec)    #saccade amplitude
-
-    duration_sec = cal_seconds(time_arr,0,de_end-de_beg)  #计算开始和结束时间之间的秒数
-    if(duration_sec==0):
+    duration_sec = (time_arr[len(time_arr) - 1] - time_arr[0]) / 1e6  # 计算开始和结束时间之间的秒数
+    if duration_sec == 0:
         duration_sec = 1
-    #初始化相关数据
+
+    # 初始化相关数据
     fix_times = 0
     sac_times = 0
     bli_times = 0
     max_fix_dur = 0
-    time_fix_dur = []
-    time_sac_dur = []
+    fix_dur_arr = []
+    sac_dur_arr = []
     time_bli_dur = []
-    sac_amp_data = []
+    # sac_amp_data = []
     total_sac_latency_sum = 0
-    fix_flag = 1
-    sac_flag = 1
-    bli_flag = 1
-    sac_flag_2 = 1
-    sac_flag_3 = 1
-    #计算一次决策里的saccade amplitude的平均值
+    fix_flag = True
+    sac_flag = True
+    bli_flag = True
+
+    # 计算一次决策里的saccade amplitude的平均值
+    # for i in range(n_samples):
+    #     if sac_amp[i] != '':
+    #         if sac_flag_2:
+    #             sac_amp_data.append(float(sac_amp[i]))
+    #             sac_flag_2 = 0
+    #         continue
+    #     sac_flag_2 = 1
+
+    # 计算fixation duration的平均值,方差,最大值以及fixation frequency
     for i in range(n_samples):
-        if sac_amp[i] != '':
-            if sac_flag_2:
-                sac_amp_data.append(float(sac_amp[i]))
-                sac_flag_2 = 0
-            continue
-        sac_flag_2 = 1
-    #计算fixation duration的平均值,方差,最大值以及fixation frequency
-    for i in range(de_end-de_beg+1):
-        if event[i]=='Fixation':
+        if event[i] == 'Fixation':
             if fix_flag:
-                fix_times=fix_times+1
+                fix_times += 1
                 tmp_data = int(duration[i])
-                time_fix_dur.append(tmp_data)
-                if(tmp_data > max_fix_dur):
+                fix_dur_arr.append(tmp_data)
+                if tmp_data > max_fix_dur:
                     max_fix_dur = tmp_data
-                fix_flag = 0
-            continue
-        fix_flag = 1
-    #计算saccade duration的平均值,方差以及saccade frequency和saccade latency(ms)
-    sac_time_1 = -1
-    for i in range(de_end-de_beg+1):
-        if event[i]=='Saccade':
+                fix_flag = False
+        else:
+            fix_flag = True
+
+    # 计算saccade duration的平均值,方差以及saccade frequency和saccade latency(ms)
+    prev_sac_end = -1
+    for i in range(n_samples):
+        if event[i] == 'Saccade':
             if sac_flag:
-                sac_times=sac_times+1
-                time_sac_dur.append(int(duration[i]))
-                sac_flag = 0
-                if(sac_time_1!=-1):
-                    total_sac_latency_sum = total_sac_latency_sum+cal_mseconds(time_arr,sac_time_1,i)
-                    sac_time_1 = -1
-            continue
-        if(sac_flag==0):
-            sac_time_1 = i
-        sac_flag = 1
-    #计算blink duration的平均值,方差以及blink frequency
-    for i in range(de_end-de_beg+1):
-        if event[i]=='Unclassified':
+                sac_times += 1
+                sac_dur_arr.append(int(duration[i]))
+                if prev_sac_end != -1:
+                    total_sac_latency_sum += int((time_arr[i] - time_arr[prev_sac_end]) / 1000)
+                sac_flag = False
+        else:
+            if not sac_flag:
+                prev_sac_end = i
+            sac_flag = True
+
+    # 计算blink duration的平均值,方差以及blink frequency
+    for i in range(n_samples):
+        if event[i] == 'Unclassified':
             if bli_flag:
-                bli_times=bli_times+1
+                bli_times += 1
                 time_bli_dur.append(int(duration[i]))
-                bli_flag = 0
-            continue
-        bli_flag = 1
-    #初始化储存所有眼动特征的数组
-    features_all_tmp = np.zeros(12)
-    if duration_sec == 0:
-        duration_sec = 1
-    features_all_tmp[0] = mean_fix_dur_arr = np.mean(time_fix_dur)
-    features_all_tmp[1] = std_fix_dur_arr = np.std(time_fix_dur)
-    features_all_tmp[2] = freq_fix_dur_arr = fix_times/duration_sec
-    features_all_tmp[3] = max_fix_dur_arr = max_fix_dur
+                bli_flag = False
+        else:
+            bli_flag = True
 
-    features_all_tmp[4] = mean_sac_dur_arr = np.mean(time_sac_dur)
-    features_all_tmp[5] = std_sac_dur_arr = np.std(time_sac_dur)
-    features_all_tmp[6] = freq_sac_dur_arr = sac_times/duration_sec
-    features_all_tmp[7] = ave_sac_amp_arr = np.mean(sac_amp_data)
-    if sac_times == 1:
-        features_all_tmp[8] = ave_sac_amp_arr = total_sac_latency_sum/sac_times
-    else:
-        features_all_tmp[8] = ave_sac_amp_arr = total_sac_latency_sum/(sac_times-1)
+    # 11 statistic features for the whole slice
+    features_all_tmp = np.zeros(11)
+    if len(fix_dur_arr) > 0:
+        features_all_tmp[0] = np.mean(fix_dur_arr)
+        features_all_tmp[1] = np.std(fix_dur_arr)
+        features_all_tmp[2] = fix_times / duration_sec
+        features_all_tmp[3] = max_fix_dur
+    if len(sac_dur_arr) > 0:
+        features_all_tmp[4] = np.mean(sac_dur_arr)
+        features_all_tmp[5] = np.std(sac_dur_arr)
+        features_all_tmp[6] = sac_times / duration_sec
+        # features_all_tmp[7] = np.mean(sac_amp_data)
+    if sac_times > 1:
+        features_all_tmp[7] = total_sac_latency_sum / (sac_times - 1)
 
-    if(len(time_bli_dur)==0):
-        features_all_tmp[9] = features_all_tmp[10] =features_all_tmp[11] = 0
-    else:
-        features_all_tmp[9] = mean_bli_dur_arr = np.mean(time_bli_dur)
-        features_all_tmp[10] = std_bli_dur_arr = np.std(time_bli_dur)
-        features_all_tmp[11] = freq_bli_dur_arr = bli_times/duration_sec
+    if len(time_bli_dur) > 0:
+        features_all_tmp[8] = np.mean(time_bli_dur)
+        features_all_tmp[9] = np.std(time_bli_dur)
+        features_all_tmp[10] = bli_times / duration_sec
+
     # 计算瞳孔直径的平均值,方差
-    for sec in range(time_sec):
-        pupil_left_mean_arr[sec] = np.mean(data_pl[0,sec*sfreq:sec*sfreq+sfreq])
-        pupil_right_mean_arr[sec] = np.mean(data_pr[0,sec*sfreq:sec*sfreq+sfreq])
-        pupil_left_std_arr[sec] = np.std(data_pl[0,sec*sfreq:sec*sfreq+sfreq])
-        pupil_right_std_arr[sec] = np.std(data_pr[0,sec*sfreq:sec*sfreq+sfreq])
-        # 计算每秒的saccade amplitude
-        for k in range(sec*sfreq,sec*sfreq+sfreq):
-            if(sac_amp[k]!=''):
-                sac_amp_arr[sec]=float(sac_amp[k])
-                break
+    pupil_left_mean_arr = np.zeros(n_windows)
+    pupil_left_std_arr = np.zeros(n_windows)
+    pupil_right_mean_arr = np.zeros(n_windows)
+    pupil_right_std_arr = np.zeros(n_windows)
+    # sac_amp_arr = np.zeros(time_sec)    #saccade amplitude
 
-    features_all_tmp = np.repeat(features_all_tmp,time_sec)
-    # copy features into seconds. eg: np.repeat([1,2,3],3) -> [1,1,1,2,2,2,3,3,3]
-    # 拼接眼动特征
-    features_all=np.concatenate((features_all,pupil_left_mean_arr,pupil_left_std_arr,pupil_right_mean_arr,pupil_right_std_arr,sac_amp_arr,features_all_tmp))
-    features_all.shape = ((time_sec,17))
+    # 4 statistic features for each window
+    for w in range(n_windows):
+        start_idx = w * step_points
+        end_idx = start_idx + step_points
+        pupil_left_mean_arr[w] = np.mean(pl[start_idx: end_idx])
+        pupil_right_mean_arr[w] = np.mean(pr[start_idx: end_idx])
+        pupil_left_std_arr[w] = np.std(pl[start_idx: end_idx])
+        pupil_right_std_arr[w] = np.std(pr[start_idx: end_idx])
+
+        # 计算每秒的saccade amplitude
+        # for k in range(sec * eye_freq, sec * eye_freq + eye_freq):
+        #     if(sac_amp[k]!=''):
+        #         sac_amp_arr[sec]=float(sac_amp[k])
+        #         break
+
+    # concatenate all features
+    # features_all_tmp shape (n_windows, 11)
+    features_all_tmp = np.tile(features_all_tmp, (n_windows, 1))
+    pupil_left_mean_arr = np.expand_dims(pupil_left_mean_arr, axis=1)
+    pupil_left_std_arr = np.expand_dims(pupil_left_std_arr, axis=1)
+    pupil_right_mean_arr = np.expand_dims(pupil_right_mean_arr, axis=1)
+    pupil_right_std_arr = np.expand_dims(pupil_right_std_arr, axis=1)
+    features_all = np.concatenate((pupil_left_mean_arr, pupil_left_std_arr,
+                                   pupil_right_mean_arr, pupil_right_std_arr, features_all_tmp), axis=1)
+    assert features_all.shape[1] == 15
     return features_all
 
 
@@ -335,36 +298,78 @@ def find_indices_of_triggers(elapsed_time_col, triggers):
     return indices
 
 
-def get_eye_feature_smooth(data, start_idx, end_idx, window_size, overlap_rate):
+def get_eye_feature_smooth(data, start_idx, end_idx, window_size, overlap_rate, sample_freq, fea_type):
     desc_row = data.row_values(0)
-    colindex = data.col_values(0)
     n_cols = len(desc_row)
-    len_c = len(colindex)
 
     # 提取出相关的列
     for i in range(n_cols):
-        if desc_row[i] == 'LocalTimeStamp':
+        if desc_row[i] == 'Recording timestamp':
             time_col = data.col_values(i)[1+start_idx:2+end_idx]
-        if desc_row[i] == 'PupilLeft':
+        if desc_row[i] == 'Pupil diameter left':
             pupil_col_l = data.col_values(i)[1 + start_idx: 2 + end_idx]
             pupil_col_r = data.col_values(i+1)[1 + start_idx: 2 + end_idx]
-        if desc_row[i] == 'GazeEventType':
+        if desc_row[i] == 'Eye movement type':
             gaze_event = data.col_values(i)[1 + start_idx:2 + end_idx]
             gaze_duration = data.col_values(i+1)[1 + start_idx:2 + end_idx]
-        if desc_row[i] == 'SaccadicAmplitude':
-            sac_amplitude = data.col_values(i)[1 + start_idx:2 + end_idx]
-    # 计算瞳孔直径的DE和PSD特征
-    band_DE_l, band_PSD_l, band_DE_r, band_PSD_r = get_pupil_psd_de_smooth(time_col, pupil_col_l, pupil_col_r,
-                                                                           window_size, overlap_rate, EYE_FREQ)
-    # 计算其他眼动特征
-    features_all = get_statistics_fea(time_col, pupil_col_l, pupil_col_r, gaze_event, gaze_duration,
-                                      sac_amplitude, start_idx, end_idx, EYE_FREQ)
-    # 返回拼接好的特征 shape=(n,33)
-    return np.concatenate((band_DE_l.T, band_DE_r.T, band_PSD_l.T, band_PSD_r.T, features_all), axis=1)
+
+    # 计算瞳孔直径的DE和PSD特征 shape: (n_bands, n_windows)
+    band_DE_l, band_PSD_l, band_DE_r, band_PSD_r = get_pupil_psd_de_smooth(pupil_col_l, pupil_col_r,
+                                                                           window_size, overlap_rate, sample_freq)
+    # 计算统计眼动特征 shape: (n_windows, 15)
+    stat_features = get_statistics_fea(time_col, pupil_col_l, pupil_col_r, gaze_event, gaze_duration, window_size,
+                                       overlap_rate, sample_freq)
+
+    # 返回拼接好的特征 shape=(n_windows, 23)
+    if fea_type == 'PSD':
+        all_feature = np.concatenate((band_PSD_l.T, band_PSD_r.T, stat_features), axis=1)
+    else:
+        all_feature = np.concatenate((band_DE_l.T, band_DE_r.T, stat_features), axis=1)
+    assert all_feature.shape[1] == 23
+    return all_feature
+
+
+# Extract and save eye features for an experiment session
+def extract_save_eye_fea(xlsx_path, save_dir, start_triggers, end_triggers,
+                         window_size, overlap_rate, sample_freq, fea_type):
+    # sanity check
+    assert len(start_triggers) == len(end_triggers)
+    assert os.path.exists(xlsx_path)
+    # create directory tree if save_dir not exists
+    if not os.path.exists(save_dir):
+        print("Create directory: " + save_dir)
+        os.makedirs(save_dir)
+
+    print("Start open {}".format(xlsx_path))
+    eye_file = xlrd.open_workbook(xlsx_path)
+    print("Successfully open {} !".format(xlsx_path))
+    eye_table = eye_file.sheets()[0]
+    desc_row = eye_table.row_values(0)
+    n_cols = len(desc_row)
+    time_col = None
+    for i in range(n_cols):
+        if desc_row[i] == 'Recording timestamp':
+            time_col = eye_table.col_values(i)[1:]
+    assert time_col is not None
+    start_indices = find_indices_of_triggers(time_col, start_triggers)
+    end_indices = find_indices_of_triggers(time_col, end_triggers)
+    # iterate over all trials
+    for i in range(len(start_triggers)):
+        print("Process trial {}".format(i))
+        trial_fea = get_eye_feature_smooth(eye_table, start_indices[i], end_indices[i],
+                                           window_size, overlap_rate, sample_freq, fea_type)
+        np.save(save_dir + '/eye_fea_{}.npy'.format(i), trial_fea)
+        print(trial_fea)
 
 
 if __name__ == '__main__':
-    print("start")
-    a = [0, -1, 3, -1, -1, 2, -1]
-    interpolate(a)
-    print(a)
+    xlsx_path = '../data/raw/lirui-confidence-text confidence_text_hanxiao_20210113 copy.xlsx'
+    save_dir = '../data/eye_feature'
+    window_size = 1
+    overlap_rate = 0
+    sample_freq = 120
+    fea_type = 'DE'
+    start_triggers = [111562, 2111565, 4000111]
+    end_triggers = [2111562, 4000000, 9000000]
+    extract_save_eye_fea(xlsx_path, save_dir, start_triggers, end_triggers,
+                         window_size, overlap_rate, sample_freq, fea_type)
