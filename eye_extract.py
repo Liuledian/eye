@@ -1,6 +1,5 @@
 import os
-# 1.2.0 xlrd
-import xlrd
+import pandas
 import numpy as np
 from pykalman import KalmanFilter
 import scipy.signal as signal
@@ -14,9 +13,11 @@ FREQUENCY_BANDS = [
 ]
 N_CHANNELS = 1
 STFT_N = 256
+COLUMNS = ['Recording timestamp', 'Pupil diameter left', 'Pupil diameter right', 'Eye movement type',
+           'Gaze event duration']
 
 
-def get_PSD_DE_for_a_window(mag_fft_data, frequency_band, sample_freq):
+def get_PSD_DE_fea_for_a_window(mag_fft_data, frequency_band, sample_freq):
     n_channels = mag_fft_data.shape[0]
     band_energy_bucket = np.zeros((n_channels, len(frequency_band)))
     band_frequency_count = np.zeros((n_channels, len(frequency_band)))
@@ -28,7 +29,6 @@ def get_PSD_DE_for_a_window(mag_fft_data, frequency_band, sample_freq):
             band_energy_bucket[:, band_index] += mag_fft_data[:, p] ** 2
             band_frequency_count[:, band_index] += 1
     window_band_PSD = band_energy_bucket / band_frequency_count  # Scale to uV
-    # why times 100 !!!!!!
     window_band_DE = np.log2(window_band_PSD)
     return window_band_PSD, window_band_DE
 
@@ -47,7 +47,7 @@ def get_PSD_DE_fea(slice_data, window_size, overlap_rate, frequency_band, sample
         han_data = data_win * hanning
         fft_data = np.fft.fft(han_data, n=STFT_N)
         mag_fft_data = np.abs(fft_data[:, 0:int(STFT_N / 2)])
-        window_band_PSD, window_band_DE = get_PSD_DE_for_a_window(mag_fft_data, frequency_band, sample_freq)
+        window_band_PSD, window_band_DE = get_PSD_DE_fea_for_a_window(mag_fft_data, frequency_band, sample_freq)
         band_PSD[:, :, window_index] = window_band_PSD
         band_DE[:, :, window_index] = window_band_DE
     return band_PSD, band_DE
@@ -119,25 +119,11 @@ def interpolate(arr):
             arr[i] = sta_num - (i - sta) * sta_num / (len_a - 1 - sta)
 
 
-def preprocess_pupil(pupil_data):
-    n_samples = len(pupil_data)
-    for i in range(n_samples):
-        if pupil_data[i] == '':
-            pupil_data[i] = -1
-        pupil_data[i] = float(pupil_data[i])
-
-    # interpolate for items with values -1
-    interpolate(pupil_data)
-    return np.array(pupil_data)
-
-
 def get_pupil_psd_de_smooth(pl, pr, window_size, overlap_rate, sample_freq):
-    # convert raw data to numeric
-    pl = preprocess_pupil(pl)
-    pr = preprocess_pupil(pr)
     de_smoothed_l, psd_smooth_l = get_DE_PSD_smooth(pl, window_size, overlap_rate, FREQUENCY_BANDS, sample_freq)
     de_smooth_r, psd_smooth_r = get_DE_PSD_smooth(pr, window_size, overlap_rate, FREQUENCY_BANDS, sample_freq)
     shape = (len(FREQUENCY_BANDS), -1)
+    # Discard channel dimension since it is 1
     de_smoothed_l = np.reshape(de_smoothed_l, shape)
     de_smooth_r = np.reshape(de_smooth_r, shape)
     psd_smooth_l = np.reshape(psd_smooth_l, shape)
@@ -150,8 +136,6 @@ def get_statistics_fea(time_arr, pl, pr, event, duration, window_size, overlap_r
     window_points = window_size * sample_freq
     step_points = window_points * (1 - overlap_rate)
     n_windows = int((n_samples - window_points) / step_points) + 1
-    pl = preprocess_pupil(pl)
-    pr = preprocess_pupil(pr)
 
     duration_sec = (time_arr[len(time_arr) - 1] - time_arr[0]) / 1e6  # 计算开始和结束时间之间的秒数
     if duration_sec == 0:
@@ -192,7 +176,7 @@ def get_statistics_fea(time_arr, pl, pr, event, duration, window_size, overlap_r
                 fix_flag = False
         else:
             fix_flag = True
-
+    print('fixation', fix_times)
     # 计算saccade duration的平均值,方差以及saccade frequency和saccade latency(ms)
     prev_sac_end = -1
     for i in range(n_samples):
@@ -207,7 +191,7 @@ def get_statistics_fea(time_arr, pl, pr, event, duration, window_size, overlap_r
             if not sac_flag:
                 prev_sac_end = i
             sac_flag = True
-
+    print('saccade', sac_times)
     # 计算blink duration的平均值,方差以及blink frequency
     for i in range(n_samples):
         if event[i] == 'Unclassified':
@@ -217,7 +201,7 @@ def get_statistics_fea(time_arr, pl, pr, event, duration, window_size, overlap_r
                 bli_flag = False
         else:
             bli_flag = True
-
+    print('blink', bli_times)
     # 11 statistic features for the whole slice
     features_all_tmp = np.zeros(11)
     if len(fix_dur_arr) > 0:
@@ -254,13 +238,7 @@ def get_statistics_fea(time_arr, pl, pr, event, duration, window_size, overlap_r
         pupil_left_std_arr[w] = np.std(pl[start_idx: end_idx])
         pupil_right_std_arr[w] = np.std(pr[start_idx: end_idx])
 
-        # 计算每秒的saccade amplitude
-        # for k in range(sec * eye_freq, sec * eye_freq + eye_freq):
-        #     if(sac_amp[k]!=''):
-        #         sac_amp_arr[sec]=float(sac_amp[k])
-        #         break
-
-    # concatenate all features
+    # Concatenate all features
     # features_all_tmp shape (n_windows, 11)
     features_all_tmp = np.tile(features_all_tmp, (n_windows, 1))
     pupil_left_mean_arr = np.expand_dims(pupil_left_mean_arr, axis=1)
@@ -273,104 +251,146 @@ def get_statistics_fea(time_arr, pl, pr, event, duration, window_size, overlap_r
     return features_all
 
 
-def find_indices_of_triggers(elapsed_time_col, triggers):
-    # elapsed_time_col and triggers are both lists of monotonically increasing int values,
-    # which are the time elapsed since the recording start time
-    # s.t. min(elapsed_time_col) <= min(triggers) <= max(triggers) <= max(elapsed_time_col)
-    indices = []
-    n_col = len(elapsed_time_col)
-    col_idx = 0
-    n_trig = len(triggers)
-    trig_idx = 0
-    while trig_idx < n_trig:
-        if elapsed_time_col[col_idx] >= triggers[trig_idx]:
-            # boundary condition
-            if col_idx == 0:
-                indices.append(col_idx)
-            elif elapsed_time_col[col_idx] + elapsed_time_col[col_idx-1] >= 2*triggers[trig_idx]:
-                indices.append(col_idx-1)
-            else:
-                indices.append(col_idx)
-            trig_idx += 1
+# def find_indices_of_triggers(elapsed_time_col, triggers):
+#     # elapsed_time_col and triggers are both lists of monotonically increasing int values,
+#     # which are the time elapsed since the recording start time
+#     # s.t. min(elapsed_time_col) <= min(triggers) <= max(triggers) <= max(elapsed_time_col)
+#     indices = []
+#     n_col = len(elapsed_time_col)
+#     col_idx = 0
+#     n_trig = len(triggers)
+#     trig_idx = 0
+#     while trig_idx < n_trig:
+#         if elapsed_time_col[col_idx] >= triggers[trig_idx]:
+#             # boundary condition
+#             if col_idx == 0:
+#                 indices.append(col_idx)
+#             elif elapsed_time_col[col_idx] + elapsed_time_col[col_idx-1] >= 2*triggers[trig_idx]:
+#                 indices.append(col_idx-1)
+#             else:
+#                 indices.append(col_idx)
+#             trig_idx += 1
+#         else:
+#             col_idx += 1
+#     assert len(indices) == len(triggers)
+#     return indices
+
+def find_index_for_a_trigger(time_col, trigger):
+    # Binary search
+    left = 0
+    right = len(time_col) - 1
+    while right - left > 1:
+        mid = int(left + (right - left) / 2)
+        if time_col[mid] == trigger:
+            return mid
+        elif time_col[mid] < trigger:
+            left = mid
         else:
-            col_idx += 1
-    assert len(indices) == len(triggers)
-    return indices
-
-
-def get_eye_feature_smooth(data, start_idx, end_idx, window_size, overlap_rate, sample_freq, fea_type):
-    desc_row = data.row_values(0)
-    n_cols = len(desc_row)
-
-    # 提取出相关的列
-    for i in range(n_cols):
-        if desc_row[i] == 'Recording timestamp':
-            time_col = data.col_values(i)[1+start_idx:2+end_idx]
-        if desc_row[i] == 'Pupil diameter left':
-            pupil_col_l = data.col_values(i)[1 + start_idx: 2 + end_idx]
-            pupil_col_r = data.col_values(i+1)[1 + start_idx: 2 + end_idx]
-        if desc_row[i] == 'Eye movement type':
-            gaze_event = data.col_values(i)[1 + start_idx:2 + end_idx]
-            gaze_duration = data.col_values(i+1)[1 + start_idx:2 + end_idx]
-
-    # 计算瞳孔直径的DE和PSD特征 shape: (n_bands, n_windows)
-    band_DE_l, band_PSD_l, band_DE_r, band_PSD_r = get_pupil_psd_de_smooth(pupil_col_l, pupil_col_r,
-                                                                           window_size, overlap_rate, sample_freq)
-    # 计算统计眼动特征 shape: (n_windows, 15)
-    stat_features = get_statistics_fea(time_col, pupil_col_l, pupil_col_r, gaze_event, gaze_duration, window_size,
-                                       overlap_rate, sample_freq)
-
-    # 返回拼接好的特征 shape=(n_windows, 23)
-    if fea_type == 'PSD':
-        all_feature = np.concatenate((band_PSD_l.T, band_PSD_r.T, stat_features), axis=1)
+            right = mid
+    if trigger <= (time_col[left] + time_col[right]) / 2:
+        return left
     else:
-        all_feature = np.concatenate((band_DE_l.T, band_DE_r.T, stat_features), axis=1)
-    assert all_feature.shape[1] == 23
-    return all_feature
+        return right
 
 
-# Extract and save eye features for an experiment session
-def extract_save_eye_fea(xlsx_path, save_dir, start_triggers, end_triggers,
-                         window_size, overlap_rate, sample_freq, fea_type):
+def remove_luminance(matrix):
+    """ Remove luminance influences on pupil diameters
+        matrix: (M, N) M is the number windows, N is the number of subjects
+
+        Return numpy.ndarray (M, N)
+    """
+    U, s, VT = np.linalg.svd(matrix)
+    M_lum = (U[:, 0].reshape(-1, 1) * s[0]) @ VT[0, :].reshape(1, -1)
+    M_lum = M_lum - np.mean(M_lum, axis=0)
+    return matrix - M_lum
+
+
+# Extract and save eye features of one clip for all subjects
+def extract_save_emotion_eye_fea(xlsx_paths, save_paths, triggers, window_size, overlap_rate, sample_freq,
+                                 fea_type, interpolate_type):
     # sanity check
-    assert len(start_triggers) == len(end_triggers)
-    assert os.path.exists(xlsx_path)
-    # create directory tree if save_dir not exists
-    if not os.path.exists(save_dir):
-        print("Create directory: " + save_dir)
-        os.makedirs(save_dir)
+    assert len(xlsx_paths) == len(save_paths)
+    assert len(save_paths) == len(triggers)
 
-    print("Start open {}".format(xlsx_path))
-    start = time.time()
-    eye_file = xlrd.open_workbook(xlsx_path)
-    end = time.time()
-    print("Successfully open {} taking {}s!".format(xlsx_path, end - start))
-    eye_table = eye_file.sheets()[0]
-    desc_row = eye_table.row_values(0)
-    n_cols = len(desc_row)
-    time_col = None
-    for i in range(n_cols):
-        if desc_row[i] == 'Recording timestamp':
-            time_col = eye_table.col_values(i)[1:]
-    assert time_col is not None
-    start_indices = find_indices_of_triggers(time_col, start_triggers)
-    end_indices = find_indices_of_triggers(time_col, end_triggers)
-    # iterate over all trials
-    for i in range(len(start_triggers)):
-        print("Process trial {}".format(i))
-        trial_fea = get_eye_feature_smooth(eye_table, start_indices[i], end_indices[i],
-                                           window_size, overlap_rate, sample_freq, fea_type)
-        np.save(save_dir + '/eye_fea_{}.npy'.format(i), trial_fea)
+    # Load all tables for one clip into memory
+    n_files = len(xlsx_paths)
+    dfs_for_a_clip = []
+    sample_nums = []
+    for i in range(n_files):
+        print("Start open {}".format(xlsx_paths[i]))
+        start_time = time.time()
+        df = pandas.read_excel(xlsx_paths[i], usecols=COLUMNS)
+        end_time = time.time()
+        print("Successfully open {} taking {}s!".format(xlsx_paths[i], end_time - start_time))
+        whole_time_col = df['Recording timestamp'].values
+        start_trig, end_trig = triggers[i]
+        start_idx = find_index_for_a_trigger(whole_time_col, start_trig)
+        end_idx = find_index_for_a_trigger(whole_time_col, end_trig)
+        dfs_for_a_clip.append(df[start_idx:end_idx+1])
+        sample_nums.append(end_idx - start_idx + 1)
+
+    # Truncate rows to assure every df has the same number of rows
+    n_samples = min(sample_nums)
+    for i in range(n_files):
+        dfs_for_a_clip[i] = dfs_for_a_clip[i][0:n_samples]
+
+    # Interpolate pupil diameter left and right, and group all subjects in a list
+    left_pupil_list = []
+    right_pupil_list = []
+    for i in range(n_files):
+        df = dfs_for_a_clip[i]
+        left_pupil_list.append(df['Pupil diameter left'].
+                               interpolate(method=interpolate_type, limit_direction='both').values)
+        right_pupil_list.append(df['Pupil diameter right'].
+                                interpolate(method=interpolate_type, limit_direction='both').values)
+
+    # Use SVD to remove luminance influences
+    left_pupil_matrix = np.vstack(left_pupil_list)
+    left_pupil_matrix = left_pupil_matrix.T
+    right_pupil_matrix = np.vstack(right_pupil_list)
+    right_pupil_matrix = right_pupil_matrix.T
+    left_pupil_matrix = remove_luminance(left_pupil_matrix)
+    right_pupil_matrix = remove_luminance(right_pupil_matrix)
+    print('left pupil matrix', left_pupil_matrix.shape, 'right pupil matrix',right_pupil_matrix.shape)
+
+    # Iterate over all subjects
+    for i in range(n_files):
+        # Compute PSD and DE features for both left and right pupils diameters
+        # shape: (n_bands, n_windows)
+        band_DE_l, band_PSD_l, band_DE_r, band_PSD_r = get_pupil_psd_de_smooth(left_pupil_matrix[:, i],
+                                                                               right_pupil_matrix[:, i],
+                                                                               window_size, overlap_rate, sample_freq)
+        # Compute statistic features
+        # shape: (n_windows, 15)
+        gaze_event = dfs_for_a_clip[i]['Eye movement type'].values
+        gaze_duration = dfs_for_a_clip[i]['Gaze event duration'].values
+        time_col = dfs_for_a_clip[i]['Recording timestamp'].values
+        stat_features = get_statistics_fea(time_col, left_pupil_matrix[:, i], right_pupil_matrix[:, 1],
+                                           gaze_event, gaze_duration, window_size, overlap_rate, sample_freq)
+
+        if fea_type == 'PSD':
+            all_feature = np.concatenate((band_PSD_l.T, band_PSD_r.T, stat_features), axis=1)
+        else:
+            all_feature = np.concatenate((band_DE_l.T, band_DE_r.T, stat_features), axis=1)
+        assert all_feature.shape[1] == 23
+        print("Feature shape", all_feature.shape)
+        # Save the processed feature
+        print("Save {}!".format(save_paths[i]))
+        np.save(save_paths[i], all_feature)
 
 
 if __name__ == '__main__':
-    xlsx_path = '../data/raw/lirui-confidence-text confidence_text_hanxiao_20210113.xlsx'
-    save_dir = '../data/eye_feature'
+    # xlsx_path = '../data/raw/lirui-confidence-text confidence_text_hanxiao_20210113 copy.xlsx'
+    clip_index = 0
+    xlsx_path_list_for_a_clip = ['../data/raw/lirui-confidence-text confidence_text_hanxiao_20210113 copy.xlsx',
+                                 '../data/raw/lirui-confidence-text confidence_text_hanxiao_20210113 copy 2.xlsx']
+    save_path__list_for_a_clip = ['../data/eye_feature/feature_0', '../data/eye_feature/feature_1']
+    trigger_list_for_a_clip = [(111562, 111562 + 2e6), (2111565, 2111565 + 2e6)]
     window_size = 1
     overlap_rate = 0
     sample_freq = 120
     fea_type = 'DE'
-    start_triggers = [111562, 2111565, 4000111]
-    end_triggers = [2111562, 4000000, 9000000]
-    extract_save_eye_fea(xlsx_path, save_dir, start_triggers, end_triggers,
-                         window_size, overlap_rate, sample_freq, fea_type)
+    interpolate_type = 'linear'
+    extract_save_emotion_eye_fea(xlsx_path_list_for_a_clip, save_path__list_for_a_clip, trigger_list_for_a_clip,
+                                 window_size, overlap_rate, sample_freq, fea_type, interpolate_type)
+
