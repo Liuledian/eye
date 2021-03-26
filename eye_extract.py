@@ -1,4 +1,3 @@
-import os
 import pandas
 import numpy as np
 from pykalman import KalmanFilter
@@ -91,34 +90,6 @@ def get_DE_PSD_smooth(slice_data, window_size, overlap_rate, frequency_bands, sa
     return de_smooth_data, psd_smooth_data
 
 
-def interpolate(arr):
-    # interpolation for items in arr with values -1
-    len_a = len(arr)
-    sta = -1
-    sta_num = -1
-    end = -1
-    end_num = -1
-    for i in range(len_a):
-        if sta == -1 and arr[0] == -1:
-            sta = 0
-            sta_num = 0
-            arr[0] = 0
-            continue
-        if sta == -1 and arr[i] == -1:
-            sta = i-1
-            sta_num = arr[i-1]
-            continue
-        if sta != -1 and arr[i] != -1:
-            end_num = arr[i]
-            for j in range(sta+1, i):
-                arr[j] = sta_num + (j - sta) * (end_num - sta_num) / (i - sta)
-            sta = -1
-    if sta != -1:
-        arr[len_a-1] = 0
-        for i in range(sta+1, len_a-1):
-            arr[i] = sta_num - (i - sta) * sta_num / (len_a - 1 - sta)
-
-
 def get_pupil_psd_de_smooth(pl, pr, window_size, overlap_rate, sample_freq):
     de_smoothed_l, psd_smooth_l = get_DE_PSD_smooth(pl, window_size, overlap_rate, FREQUENCY_BANDS, sample_freq)
     de_smooth_r, psd_smooth_r = get_DE_PSD_smooth(pr, window_size, overlap_rate, FREQUENCY_BANDS, sample_freq)
@@ -155,16 +126,6 @@ def get_statistics_fea(time_arr, pl, pr, event, duration, window_size, overlap_r
     sac_flag = True
     bli_flag = True
 
-    # 计算一次决策里的saccade amplitude的平均值
-    # for i in range(n_samples):
-    #     if sac_amp[i] != '':
-    #         if sac_flag_2:
-    #             sac_amp_data.append(float(sac_amp[i]))
-    #             sac_flag_2 = 0
-    #         continue
-    #     sac_flag_2 = 1
-
-    # 计算fixation duration的平均值,方差,最大值以及fixation frequency
     for i in range(n_samples):
         if event[i] == 'Fixation':
             if fix_flag:
@@ -213,7 +174,6 @@ def get_statistics_fea(time_arr, pl, pr, event, duration, window_size, overlap_r
         features_all_tmp[4] = np.mean(sac_dur_arr)
         features_all_tmp[5] = np.std(sac_dur_arr)
         features_all_tmp[6] = sac_times / duration_sec
-        # features_all_tmp[7] = np.mean(sac_amp_data)
     if sac_times > 1:
         features_all_tmp[7] = total_sac_latency_sum / (sac_times - 1)
 
@@ -227,7 +187,6 @@ def get_statistics_fea(time_arr, pl, pr, event, duration, window_size, overlap_r
     pupil_left_std_arr = np.zeros(n_windows)
     pupil_right_mean_arr = np.zeros(n_windows)
     pupil_right_std_arr = np.zeros(n_windows)
-    # sac_amp_arr = np.zeros(time_sec)    #saccade amplitude
 
     # 4 statistic features for each window
     for w in range(n_windows):
@@ -251,30 +210,6 @@ def get_statistics_fea(time_arr, pl, pr, event, duration, window_size, overlap_r
     return features_all
 
 
-# def find_indices_of_triggers(elapsed_time_col, triggers):
-#     # elapsed_time_col and triggers are both lists of monotonically increasing int values,
-#     # which are the time elapsed since the recording start time
-#     # s.t. min(elapsed_time_col) <= min(triggers) <= max(triggers) <= max(elapsed_time_col)
-#     indices = []
-#     n_col = len(elapsed_time_col)
-#     col_idx = 0
-#     n_trig = len(triggers)
-#     trig_idx = 0
-#     while trig_idx < n_trig:
-#         if elapsed_time_col[col_idx] >= triggers[trig_idx]:
-#             # boundary condition
-#             if col_idx == 0:
-#                 indices.append(col_idx)
-#             elif elapsed_time_col[col_idx] + elapsed_time_col[col_idx-1] >= 2*triggers[trig_idx]:
-#                 indices.append(col_idx-1)
-#             else:
-#                 indices.append(col_idx)
-#             trig_idx += 1
-#         else:
-#             col_idx += 1
-#     assert len(indices) == len(triggers)
-#     return indices
-
 def find_index_for_a_trigger(time_col, trigger):
     # Binary search
     left = 0
@@ -296,7 +231,6 @@ def find_index_for_a_trigger(time_col, trigger):
 def remove_luminance(matrix):
     """ Remove luminance influences on pupil diameters
         matrix: (M, N) M is the number windows, N is the number of subjects
-
         Return numpy.ndarray (M, N)
     """
     U, s, VT = np.linalg.svd(matrix)
@@ -380,17 +314,16 @@ def extract_save_emotion_eye_fea(xlsx_paths, save_paths, triggers, window_size, 
 
 
 if __name__ == '__main__':
-    # xlsx_path = '../data/raw/lirui-confidence-text confidence_text_hanxiao_20210113 copy.xlsx'
     clip_index = 0
     xlsx_path_list_for_a_clip = ['../data/raw/lirui-confidence-text confidence_text_hanxiao_20210113 copy.xlsx',
                                  '../data/raw/lirui-confidence-text confidence_text_hanxiao_20210113 copy 2.xlsx']
-    save_path__list_for_a_clip = ['../data/eye_feature/feature_0', '../data/eye_feature/feature_1']
+    save_path_list_for_a_clip = ['../data/eye_feature/feature_0', '../data/eye_feature/feature_1']
     trigger_list_for_a_clip = [(111562, 111562 + 2e6), (2111565, 2111565 + 2e6)]
     window_size = 1
     overlap_rate = 0
     sample_freq = 120
     fea_type = 'DE'
     interpolate_type = 'linear'
-    extract_save_emotion_eye_fea(xlsx_path_list_for_a_clip, save_path__list_for_a_clip, trigger_list_for_a_clip,
+    extract_save_emotion_eye_fea(xlsx_path_list_for_a_clip, save_path_list_for_a_clip, trigger_list_for_a_clip,
                                  window_size, overlap_rate, sample_freq, fea_type, interpolate_type)
 
